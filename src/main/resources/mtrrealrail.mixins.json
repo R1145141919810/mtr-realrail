@@ -1,0 +1,14 @@
+{
+	"required": true,
+	"minVersion": "0.8",
+	"package": "mtr.realrail.mixin",
+	"compatibilityLevel": "JAVA_17",
+	"mixins": [
+		"RailSignalIsolationMixin",
+		"VehicleSchemaAccessor",
+		"VehicleSimulateMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

@@ -1,0 +1,259 @@
+// MTR RealRail —— MC 1.20.1 + Forge 工程（ForgeGradle 6.0）
+// 说明：docs/03 原定的 Architectury（dev.architectury.loom 1.0-SNAPSHOT / architectury-plugin
+// 3.4-SNAPSHOT）插件快照已从 maven.architectury.dev 下架，无法解析，因此改为 ForgeGradle
+// 单平台构建；需求一/需求二的全部逻辑与 docs/01、docs/02 保持一致，仅把 Architectury API
+// （NetworkManager / PlayerEvent / LifecycleEvent）替换为等价的 Forge 原生 API。
+plugins {
+    id 'eclipse'
+    id 'idea'
+    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+}
+
+version = "${mod_version}+${minecraft_version}"
+group = mod_group_id
+
+base {
+    archivesName = mod_id
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+minecraft {
+    mappings channel: mapping_channel, version: mapping_version
+    copyIdeResources = true
+
+    runs {
+        configureEach {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            property 'mixin.debug.verbose', 'true'
+
+            mods {
+                "${mod_id}" {
+                    source sourceSets.main
+                }
+            }
+        }
+
+        client {
+            property 'forge.enabledGameTestNamespaces', mod_id
+        }
+
+        server {
+            property 'forge.enabledGameTestNamespaces', mod_id
+            // 冒烟自检：服务端启动时强制加载两个 Mixin 目标类，注入失败会直接崩溃/报错
+            property 'mtrrealrail.verifyMixins', 'true'
+            args '--nogui'
+        }
+    }
+}
+
+sourceSets.main.resources { srcDir 'src/generated/resources' }
+
+repositories {
+    maven {
+        name = 'Modrinth'
+        url = 'https://api.modrinth.com/maven'
+    }
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+
+    // MTR 4.0.x 发行版内嵌的 org.mtr.core（Transport-Simulation-Core）与随附的
+    // 重定位 fastutil（org.mtr.libraries.it.unimi.dsi.fastutil.*）。
+    // MTR 发行 jar 由 setupLibrary 任务从 Modrinth 下载并裁剪得到，运行时由 MTR 本体提供，
+    // 因此这里只做 compileOnly。
+    compileOnly files('libs/mtr-compile.jar')
+
+    // Mixin 注解（运行时由 Forge 提供）
+    compileOnly 'org.spongepowered:mixin:0.8.5'
+}
+
+// ---------------------------------------------------------------------------
+// setupLibrary：下载 MTR 发行 jar 并提取编译依赖（对应 docs/03 §4.2）
+// ---------------------------------------------------------------------------
+def mtrReleaseUrl = "https://api.modrinth.com/maven/maven/modrinth/minecraft-transit-railway/FORGE-${mtr_version}+1.20.1/minecraft-transit-railway-FORGE-${mtr_version}+1.20.1.jar"
+def mtrCheckout = layout.projectDirectory.file("checkouts/mtr-forge-${mtr_version}.jar").asFile
+def mtrCompileJar = layout.projectDirectory.file('libs/mtr-compile.jar').asFile
+
+// 判断文件是否为完整可读的 zip（避免使用被截断的下载结果）
+def isValidZip = { File file ->
+    if (file == null || !file.isFile() || file.length() < 1024) {
+        return false
+    }
+    try {
+        def zip = new java.util.zip.ZipFile(file)
+        zip.close()
+        return true
+    } catch (Exception ignored) {
+        return false
+    }
+}
+
+tasks.register('setupLibrary') {
+    description = '下载 MTR 发行 jar 并提取 org.mtr.core / org.mtr.mod / org.mtr.mapping + 重定位依赖作为编译依赖'
+    group = 'mtr'
+
+    outputs.file(mtrCompileJar)
+    // 提取范围变更时使缓存失效（修改此值即可强制重新生成 mtr-compile.jar）
+    inputs.property('extractFormat', 3)
+
+    doLast {
+        if (!isValidZip(mtrCheckout)) {
+            // 1) 优先复用工作区中已下载的发行 jar（离线/慢速网络友好）
+            final List<File> localCandidates = [
+                    rootProject.file("../checkouts/mtr-forge-release.jar"),
+                    rootProject.file("../checkouts/mtr-forge.jar"),
+                    rootProject.file("../checkouts/mtr-common.jar")
+            ]
+            boolean ready = false
+            for (final File candidate : localCandidates) {
+                if (isValidZip(candidate) && new java.util.zip.ZipFile(candidate).withCloseable { it.getEntry('org/mtr/core/data/Vehicle.class') != null }) {
+                    logger.lifecycle("复用本地 MTR 构件：${candidate}")
+                    mtrCheckout.parentFile.mkdirs()
+                    java.nio.file.Files.copy(candidate.toPath(), mtrCheckout.toPath(),
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    ready = true
+                    break
+                }
+            }
+
+            // 2) 否则从 Modrinth Maven 下载（最多重试 3 次，下载后校验 zip 完整性）
+            for (int attempt = 1; !ready && attempt <= 3; attempt++) {
+                try {
+                    logger.lifecycle("下载 MTR 发行 jar（第 ${attempt} 次）：${mtrReleaseUrl}")
+                    mtrCheckout.parentFile.mkdirs()
+                    def connection = new URL(mtrReleaseUrl).openConnection()
+                    connection.connectTimeout = 30000
+                    connection.readTimeout = 120000
+                    connection.inputStream.withStream { input -> mtrCheckout.withOutputStream { output -> output << input } }
+                    ready = isValidZip(mtrCheckout)
+                } catch (Exception exception) {
+                    logger.warn("下载失败：${exception.message}")
+                }
+            }
+
+            if (!ready) {
+                throw new GradleException("无法获取 MTR 发行 jar（${mtrCheckout}）。请手动下载 \n" +
+                        "  ${mtrReleaseUrl}\n" +
+                        "并保存为 ${mtrCheckout} 后重新运行。")
+            }
+        }
+
+        mtrCompileJar.parentFile.mkdirs()
+        def zipFile = new java.util.zip.ZipFile(mtrCheckout)
+        def zipOut = new java.util.zip.ZipOutputStream(new FileOutputStream(mtrCompileJar))
+        int count = 0
+        try {
+            zipFile.entries().each { entry ->
+                // org/mtr/core：需求一/需求二的注入目标
+                // org/mtr/mapping + org/mtr/mod：向 MTR 原版轨道界面（RailModifierScreen）注入按钮所需
+                // org/mtr/libraries：MTR 重定位的第三方库（fastutil / gson 等），编译期解析签名用
+                final boolean wanted = !entry.directory && (
+                        entry.name.startsWith('org/mtr/core/') ||
+                        entry.name.startsWith('org/mtr/mod/') ||
+                        entry.name.startsWith('org/mtr/mapping/') ||
+                        entry.name.startsWith('org/mtr/libraries/'))
+                if (wanted) {
+                    zipOut.putNextEntry(new java.util.zip.ZipEntry(entry.name))
+                    zipFile.getInputStream(entry).withStream { input -> zipOut << input }
+                    zipOut.closeEntry()
+                    count++
+                }
+            }
+        } finally {
+            zipOut.close()
+            zipFile.close()
+        }
+        logger.lifecycle("已生成编译依赖 ${mtrCompileJar}（${count} 个类文件，源自 MTR ${mtr_version}）")
+    }
+}
+
+tasks.named('compileJava') {
+    dependsOn 'setupLibrary'
+}
+
+// ---------------------------------------------------------------------------
+// 开发冒烟测试用：mtr 占位模组（仅提供 modId，org.mtr.core 类由 -PmtrOnClasspath 提供）
+// 生产版 MTR jar 自带 mixin 无法在 ForgeGradle 开发环境中加载，因此调试时用存根模组。
+// ---------------------------------------------------------------------------
+tasks.register('compileStubMtr', JavaCompile) {
+    dependsOn 'setupLibrary'
+    source = fileTree('.devstub') { include '*.java' }
+    classpath = sourceSets.main.compileClasspath
+    destinationDirectory = layout.projectDirectory.dir('.devstub/classes')
+    options.encoding = 'UTF-8'
+    options.release.set(17)
+}
+
+tasks.register('buildMtrStubJar', Jar) {
+    description = '构建开发用的 mtr 占位模组到 run/mods/（内含裁剪后的 org.mtr.core 类，仅供开发冒烟测试）'
+    dependsOn 'compileStubMtr', 'setupLibrary'
+    archiveFileName = 'mtr-stub.jar'
+    destinationDirectory = layout.projectDirectory.dir('run/mods')
+    from layout.projectDirectory.dir('.devstub/classes')
+    from(layout.projectDirectory.dir('.devstub/mtr-stub')) {
+        include 'META-INF/mods.toml'
+    }
+    // 完整的 org.mtr.core + 映射层 + mod 层类（供 RailModifierScreenMixin 的类型解析；
+    // 不含 MTR 自带的 mixin 配置，也不会注册任何 MTR 方块/物品，仅作开发环境占位）+ 重定位依赖
+    from(zipTree(mtrCheckout)) {
+        include 'org/mtr/core/**'
+        include 'org/mtr/mod/**'
+        include 'org/mtr/mapping/**'
+        include 'org/mtr/libraries/**'
+        exclude 'META-INF/**'
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 资源处理 / 打包
+// ---------------------------------------------------------------------------
+tasks.named('processResources', ProcessResources).configure {
+    var replaceProperties = [
+            minecraft_version      : minecraft_version,
+            minecraft_version_range: minecraft_version_range,
+            forge_version          : forge_version,
+            forge_version_range    : forge_version_range,
+            loader_version_range   : loader_version_range,
+            mod_id                 : mod_id,
+            mod_name               : mod_name,
+            mod_license            : mod_license,
+            mod_version            : mod_version,
+            mod_authors            : mod_authors,
+    ]
+    inputs.properties replaceProperties
+    // 资源文件（mods.toml / pack.mcmeta）含中文，必须显式指定 UTF-8，
+    // 否则会按平台默认编码（Windows 中文环境为 GBK）读取导致乱码
+    filteringCharset = 'UTF-8'
+
+    filesMatching(['META-INF/mods.toml', 'pack.mcmeta']) {
+        expand replaceProperties + [project: project]
+    }
+}
+
+tasks.named('jar', Jar).configure {
+    manifest {
+        attributes([
+                'Specification-Title'     : mod_id,
+                'Specification-Vendor'    : mod_authors,
+                'Specification-Version'   : '1',
+                'Implementation-Title'    : project.name,
+                'Implementation-Version'  : project.jar.archiveVersion,
+                'Implementation-Vendor'   : mod_authors,
+                'Implementation-Timestamp': new Date().format("yyyy-MM-dd'T'HH:mm:ssZ"),
+                // Forge 通过该清单属性加载 Mixin 配置（与 MTR 自身的 mtr.mixins.json 同机制）
+                // mtrrealrail.railgui.mixins.json：向 MTR 原版轨道界面注入"节点限速判定"按钮（客户端专属）
+                'MixinConfigs'            : 'mtrrealrail.mixins.json,mtrrealrail.railgui.mixins.json'
+        ])
+    }
+
+    finalizedBy 'reobfJar'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release.set(17)
+}

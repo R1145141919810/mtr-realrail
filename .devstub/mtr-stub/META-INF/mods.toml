@@ -1,0 +1,9 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MIT"
+
+[[mods]]
+modId="mtr"
+version="4.0.5"
+displayName="MTR (dev stub)"
+description="仅用于开发环境冒烟测试：提供 mtr 模组 id，真正的 org.mtr.core 类由类路径上的 libs/mtr-compile.jar 提供。"

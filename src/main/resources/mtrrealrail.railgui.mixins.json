@@ -1,0 +1,13 @@
+{
+	"required": false,
+	"minVersion": "0.8",
+	"package": "mtr.realrail.mixin",
+	"compatibilityLevel": "JAVA_17",
+	"mixins": [],
+	"client": [
+		"RailModifierScreenMixin"
+	],
+	"injectors": {
+		"defaultRequire": 0
+	}
+}

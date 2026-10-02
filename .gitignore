@@ -1,0 +1,17 @@
+# ---- Gradle / 构建产物 ----
+.gradle/
+build/
+run/
+checkouts/
+libs/mtr-compile.jar
+.devstub/classes/
+*.log
+
+# ---- IDE ----
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+out/
+bin/

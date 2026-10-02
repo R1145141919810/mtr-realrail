@@ -1,0 +1,38 @@
+modLoader="javafml"
+loaderVersion="${loader_version_range}"
+license="${mod_license}"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="更好的列车限速及信号判定"
+description='''
+更好的列车限速及信号判定（MTR RealRail）——Minecraft Transit Railway 附属模组。
+
+1. 限速变更时机后移：列车默认在车尾完全经过轨道连接器后才变更速度（原版为车头进入新轨道段立即变速）；
+   手持刷子右击轨道节点会照常打开 MTR 原版轨道界面，点击其中新增的"节点限速判定"按钮即可逐个节点
+   切换"车头判定 / 车尾判定"，设置保存在世界存档中（原版界面与功能完全保留）。
+2. 多信号系统互不干扰：16 色信号连接器各自独立判断区间占用，列车只检查并预留自己实际所在信号系统的区间。
+'''
+authors="${mod_authors}"
+
+[[dependencies.${mod_id}]]
+    modId="forge"
+    mandatory=true
+    versionRange="${forge_version_range}"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="${minecraft_version_range}"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="mtr"
+    mandatory=true
+    versionRange="[4.0.0,)"
+    ordering="AFTER"
+    side="BOTH"
