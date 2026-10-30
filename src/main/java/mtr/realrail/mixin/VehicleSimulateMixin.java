@@ -2,6 +2,13 @@ package mtr.realrail.mixin;
 
 import mtr.realrail.SignalIsolationRegistry;
 import mtr.realrail.SpeedLimitHelper;
+import mtr.realrail.traffic.DepotSettingsResolver;
+import mtr.realrail.traffic.DepartureCoordinator;
+import mtr.realrail.traffic.OptimizeSettings;
+import mtr.realrail.traffic.RouteRefresher;
+import mtr.realrail.traffic.TrafficRegistry;
+import mtr.realrail.traffic.VehicleSnapshot;
+import org.mtr.core.data.Data;
 import org.mtr.core.data.PathData;
 import org.mtr.core.data.TransportMode;
 import org.mtr.core.data.Vehicle;
@@ -10,42 +17,38 @@ import org.mtr.libraries.it.unimi.dsi.fastutil.ints.IntAVLTreeSet;
 import org.mtr.libraries.it.unimi.dsi.fastutil.longs.Long2LongAVLTreeMap;
 import org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import org.mtr.libraries.it.unimi.dsi.fastutil.objects.ObjectList;
+import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * 需求一 + 需求二的 Vehicle 侧钩子。
+ * 需求一 + 需求二 + 新增调度功能的 Vehicle 侧钩子。
  *
- * <p>目标类：{@code org.mtr.core.data.Vehicle}（Transport-Simulation-Core，随 MTR 4.0.x 发行）。
- * 三个注入点：</p>
+ * <p>目标类：{@code org.mtr.core.data.Vehicle}（Transport-Simulation-Core，随 MTR 4.0.x 发行）。</p>
  * <ol>
- *   <li>{@code simulate} HEAD：更新限速判定状态（边界跨越检测）与信号系统归属注册（需求一、二）。</li>
- *   <li>{@code simulateMoving} 中 {@code PathData.getSpeedLimitMetersPerMillisecond()} 调用
- *       （发行版 4.0.5 该方法内唯一一处）：重定向为车尾/节点模式感知的生效限速。</li>
- *   <li>{@code simulateMoving} 中 {@code Siding.getUpcomingSlowerSpeed(...)} 调用（唯一一处）：
- *       重定向为车尾感知的预制动。</li>
+ *   <li>{@code simulate} HEAD：限速判定状态（需求一）、信号系统归属（需求二）、
+ *       <b>动态轨道占用快照</b>与<b>动态发车/避让决策</b>（新功能）。</li>
+ *   <li>{@code simulateMoving} 中 {@code PathData.getSpeedLimitMetersPerMillisecond()} 调用：
+ *       车尾/节点模式感知的生效限速。</li>
+ *   <li>{@code simulateMoving} 中 {@code Siding.getUpcomingSlowerSpeed(...)} 调用：车尾感知预制动。</li>
+ *   <li>{@code simulateStopped} RETURN：把停站计时压住（等待让行），即"动态发车"的执行端。</li>
  * </ol>
  *
- * <p>安全制动（stoppingPoint 分支：信号红灯、平台停车、前方占用）与物理防撞
- * （VehiclePosition 重叠检测）完全不受影响。</p>
- *
- * <p>签名依据（已用 javap 核对 MTR 4.0.5 Forge 发行 jar）：</p>
- * <ul>
- *   <li>{@code public void simulate(long, ObjectArrayList, Long2LongAVLTreeMap)}</li>
- *   <li>{@code private void simulateMoving(long, ObjectArrayList, int)}</li>
- *   <li>{@code public double PathData.getSpeedLimitMetersPerMillisecond()}</li>
- *   <li>{@code public static double Siding.getUpcomingSlowerSpeed(ObjectList, int, double, double, double)}</li>
- *   <li>{@code protected double VehicleSchema.railProgress}（父类字段，经 {@link VehicleSchemaAccessor} 访问）</li>
- * </ul>
- *
- * <p>注意：MTR 发行 jar 把 fastutil 重定位到了 {@code org.mtr.libraries.it.unimi.dsi.fastutil}，
- * 因此描述符必须使用重定位后的类型（这也是本模组编译依赖使用发行 jar 而非 dev jar 的原因）。</p>
+ * <p>签名依据（javap 核对 MTR 4.0.5 Forge 发行 jar）：{@code simulate(long, ObjectArrayList, Long2LongAVLTreeMap)}、
+ * {@code simulateStopped(long, ObjectArrayList, int)}、{@code protected double VehicleSchema.railProgress/speed/elapsedDwellTime}、
+ * {@code protected final Data NameColorDataBaseSchema.data}。</p>
  */
 @Mixin(Vehicle.class)
 public abstract class VehicleSimulateMixin {
+
+	/** Vehicle 自身的私有字段（客户端侧车辆不参与调度逻辑）。 */
+	@Shadow
+	@Final
+	private boolean isClientside;
 
 	/**
 	 * 读取车头沿路径的位置。
@@ -53,6 +56,19 @@ public abstract class VehicleSimulateMixin {
 	 */
 	private double mtrrealrail$railProgress() {
 		return ((VehicleSchemaAccessor) (Object) this).mtrrealrail$getRailProgress();
+	}
+
+	/**
+	 * 站台停站时长（毫秒）：与 MTR {@code simulateStopped} 中"停在节点后"分支的取值一致
+	 * （{@code currentIndex - 1} 段的 dwellTime）。
+	 */
+	private static long mtrrealrail$totalDwellMillis(ObjectList<PathData> path, int headIndex, double railProgress) {
+		final PathData currentPathData = Utilities.getElement(path, headIndex);
+		if (currentPathData == null || railProgress != currentPathData.getStartDistance()) {
+			return 0;
+		}
+		final PathData previousPathData = Utilities.getElement(path, headIndex - 1);
+		return previousPathData == null ? 0 : previousPathData.getDwellTime();
 	}
 
 	@Inject(method = "simulate", at = @At("HEAD"))
@@ -66,16 +82,16 @@ public abstract class VehicleSimulateMixin {
 		final ObjectList<PathData> path = vehicle.vehicleExtraData.immutablePath;
 		final double railProgress = mtrrealrail$railProgress();
 		final int headIndex = Utilities.getIndexFromConditionalList(path, railProgress);
+		final double totalVehicleLength = vehicle.vehicleExtraData.getTotalVehicleLength();
 
 		// 需求一：边界跨越检测 + 车尾通过判定
-		SpeedLimitHelper.updateState(vehicleId, path, railProgress, vehicle.vehicleExtraData.getTotalVehicleLength(), headIndex);
+		SpeedLimitHelper.updateState(vehicleId, path, railProgress, totalVehicleLength, headIndex);
 
-		// 需求二：登记列车当前所属信号系统（车身覆盖各段 signalColors 的并集）。
-		// 连续移动模式（飞机/船只/缆车）不参与信号逻辑，跳过。
+		// 需求二：登记列车当前所属信号系统（车身覆盖各段 signalColors 的并集）
 		final TransportMode transportMode = vehicle.getTransportMode();
 		if (transportMode != null && !transportMode.continuousMovement) {
 			final IntAVLTreeSet colors = new IntAVLTreeSet();
-			final double tailProgress = railProgress - vehicle.vehicleExtraData.getTotalVehicleLength();
+			final double tailProgress = railProgress - totalVehicleLength;
 			int tailIndex = Utilities.getIndexFromConditionalList(path, tailProgress);
 			if (tailIndex < 0) {
 				tailIndex = 0;
@@ -89,9 +105,67 @@ public abstract class VehicleSimulateMixin {
 			}
 			SignalIsolationRegistry.update(vehicleId, colors);
 		}
+
+		if (isClientside) {
+			return;
+		}
+
+		// 新功能：动态轨道占用快照 + 自动最优路径规划/动态发车避让决策
+		final Data data = ((NameColorDataBaseSchemaAccessor) (Object) this).mtrrealrail$getData();
+		final long nowMillis = data == null ? System.currentTimeMillis() : data.getCurrentMillis();
+		final VehicleSchemaAccessor accessor = (VehicleSchemaAccessor) (Object) this;
+
+		final VehicleSnapshot snapshot = new VehicleSnapshot(vehicleId, path, railProgress, accessor.mtrrealrail$getSpeed(),
+				totalVehicleLength, vehicle.vehicleExtraData.getDeceleration(), headIndex, accessor.mtrrealrail$getElapsedDwellTime(),
+				mtrrealrail$totalDwellMillis(path, headIndex, railProgress), vehicle.vehicleExtraData.getThisRouteId(),
+				vehicle.vehicleExtraData.getSidingId(), nowMillis);
+		TrafficRegistry.update(snapshot, data);
+
+		// 新功能：车站站台智能调度（站台占用 → 进站前引导/等待）
+		mtr.realrail.traffic.PlatformDispatcher.tick(snapshot, data, System.currentTimeMillis());
+
+		final OptimizeSettings settings = DepotSettingsResolver.settingsForVehicle(vehicleId);
+		// 注意：等待计时用墙钟（System.currentTimeMillis），与游戏内时钟解耦，
+		// 避免伺服/暂停/时间跳变时"等待上限"永远不到达而把列车压死在站台。
+		if (DepartureCoordinator.evaluate(snapshot, settings, System.currentTimeMillis()) == DepartureCoordinator.Decision.REPLAN_AND_DEPART) {
+			// 等待超时 → 强制发车，并让 MTR 用最新路况重新生成该车厂路径（"变更路径"）
+			RouteRefresher.refreshForVehicle(data, vehicleId);
+		}
 	}
 
-	/** 车头段限速 → 车尾/节点模式感知的生效限速（需求一）。 */
+	/**
+	 * 动态发车与避让的执行端：需要等待让行时，把停站计时压在"关门时刻"之前，
+	 * MTR 的 {@code simulateStopped} 就不会触发 {@code startUp}（发车）。
+	 * 列车保持开门等待，直到 {@link DepartureCoordinator} 改变决策。
+	 */
+	@Inject(method = "simulateStopped", at = @At("RETURN"))
+	private void mtrrealrail$applyDepartureHold(long millisElapsed, ObjectArrayList<?> vehiclePositions, int currentIndex, CallbackInfo callbackInfo) {
+		if (isClientside) {
+			return;
+		}
+		final Vehicle vehicle = (Vehicle) (Object) this;
+		final long vehicleId = vehicle.getId();
+		if (!DepartureCoordinator.shouldHold(vehicleId) && !mtr.realrail.traffic.PlatformDispatcher.shouldWaitForPlatform(vehicleId)) {
+			return;
+		}
+
+		final PathData currentPathData = Utilities.getElement(vehicle.vehicleExtraData.immutablePath, currentIndex - 1);
+		final long totalDwellMillis = currentPathData == null ? 0 : currentPathData.getDwellTime();
+		if (totalDwellMillis <= 0) {
+			return;
+		}
+
+		final long doorCloseTime = Math.max(totalDwellMillis / 2, totalDwellMillis - 3200L - 1000L);
+		final VehicleSchemaAccessor accessor = (VehicleSchemaAccessor) (Object) this;
+		if (accessor.mtrrealrail$getElapsedDwellTime() >= doorCloseTime) {
+			accessor.mtrrealrail$setElapsedDwellTime(Math.max(0, doorCloseTime - 1));
+		}
+	}
+
+	/**
+	 * 替换车头段限速读取（simulateMoving ATO 分支中唯一一处
+	 * {@code immutablePath.get(currentIndex).getSpeedLimitMetersPerMillisecond()} 调用）。
+	 */
 	@Redirect(method = "simulateMoving", at = @At(value = "INVOKE", target = "Lorg/mtr/core/data/PathData;getSpeedLimitMetersPerMillisecond()D"))
 	private double mtrrealrail$getEffectiveSpeedLimit(PathData pathData) {
 		final Vehicle vehicle = (Vehicle) (Object) this;

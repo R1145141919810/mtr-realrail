@@ -35,6 +35,10 @@ public final class MtrRealRail {
 	/** 存档内节点判定数据的目录与文件名（world/mtrrealrail/nodes.json）。 */
 	private static final String SAVE_DIR_NAME = "mtrrealrail";
 	private static final String SAVE_FILE_NAME = "nodes.json";
+	/** 车厂级「优化线路配置」文件名（world/mtrrealrail/optimize.json）。 */
+	private static final String OPTIMIZE_FILE_NAME = "optimize.json";
+	/** 车站站台智能调度配置文件名（world/mtrrealrail/platforms.json）。 */
+	private static final String PLATFORM_FILE_NAME = "platforms.json";
 
 	public MtrRealRail() {
 		final Path configFile = configPath();
@@ -44,6 +48,8 @@ public final class MtrRealRail {
 			RealRailConfig.INSTANCE.save(configFile);
 		}
 		NodeModeNetwork.init();
+		OptimizeNetwork.init();
+		PlatformNetwork.init();
 		LOGGER.info("[{}] {} 已载入：默认节点判定 = {}，信号隔离 = {}",
 				MOD_ID, MOD_NAME, RealRailConfig.INSTANCE.defaultNodeMode,
 				RealRailConfig.INSTANCE.signalIsolation);
@@ -55,7 +61,18 @@ public final class MtrRealRail {
 		RealRailConfig.INSTANCE.load(configPath());
 		final Path worldDir = event.getServer().getWorldPath(LevelResource.ROOT);
 		NodeModeStore.load(worldDir.resolve(SAVE_DIR_NAME).resolve(SAVE_FILE_NAME));
+		mtr.realrail.traffic.OptimizeConfigStore.load(worldDir.resolve(SAVE_DIR_NAME).resolve(OPTIMIZE_FILE_NAME));
+		mtr.realrail.traffic.PlatformDispatchStore.load(worldDir.resolve(SAVE_DIR_NAME).resolve(PLATFORM_FILE_NAME));
+		// 站台智能调度依赖 tsc-dispatch（外置调度服务）：启动轮询
+		mtr.realrail.dispatch.TscDispatchBridge.clear();
+		if (mtr.realrail.dispatch.TscDispatchBridge.isEnabled()) {
+			mtr.realrail.dispatch.TscDispatchBridge.start();
+		}
+		mtr.realrail.traffic.DepotSettingsResolver.invalidate();
 		LOGGER.info("[{}] 已载入 {} 个节点的判定设置：{}", MOD_ID, NodeModeStore.size(), NodeModeStore.savePath());
+		LOGGER.info("[{}] 已载入 {} 个车厂的「优化线路配置」：{}", MOD_ID,
+				mtr.realrail.traffic.OptimizeConfigStore.size(),
+				worldDir.resolve(SAVE_DIR_NAME).resolve(OPTIMIZE_FILE_NAME));
 
 		if (Boolean.getBoolean("mtrrealrail.verifyMixins")) {
 			verifyMixinTargets();
@@ -72,7 +89,8 @@ public final class MtrRealRail {
 				"org.mtr.core.data.VehicleExtraData",
 				"org.mtr.core.data.Rail",
 				"org.mtr.core.data.PathData",
-				"org.mtr.core.data.Siding"}) {
+				"org.mtr.core.data.Siding",
+				"org.mtr.core.data.RoutePlatformData"}) {
 			try {
 				final Class<?> clazz = Class.forName(className);
 				LOGGER.info("[{}] Mixin 目标类加载成功：{}（{}）", MOD_ID, className, clazz.getClassLoader());

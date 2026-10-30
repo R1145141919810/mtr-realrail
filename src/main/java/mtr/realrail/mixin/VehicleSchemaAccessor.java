@@ -5,9 +5,9 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;
 
 /**
- * 访问 {@link VehicleSchema} 中受保护字段 {@code railProgress} 的 Accessor Mixin。
+ * 访问 {@link VehicleSchema} 中受保护字段的 Accessor Mixin。
  *
- * <p>为什么不用 {@code @Shadow}：该字段声明在 {@code Vehicle} 的<b>父类</b>
+ * <p>为什么不用 {@code @Shadow}：这些字段声明在 {@code Vehicle} 的<b>父类</b>
  * （生成类 {@code org.mtr.core.generated.data.VehicleSchema}）中，Mixin 的
  * {@code @Shadow} 只在目标类自身的字段里查找，实测会报
  * {@code @Shadow field railProgress was not located in the target class org.mtr.core.data.Vehicle}
@@ -22,4 +22,16 @@ public interface VehicleSchemaAccessor {
 	/** 车头沿整条路径的位置（行驶方向最前端）。 */
 	@Accessor("railProgress")
 	double mtrrealrail$getRailProgress();
+
+	/** 当前速度（米/毫秒）。 */
+	@Accessor("speed")
+	double mtrrealrail$getSpeed();
+
+	/** 当前停站已用时（毫秒）。 */
+	@Accessor("elapsedDwellTime")
+	long mtrrealrail$getElapsedDwellTime();
+
+	/** 压住/放行停站计时（动态发车与避让使用）。 */
+	@Accessor("elapsedDwellTime")
+	void mtrrealrail$setElapsedDwellTime(long value);
 }

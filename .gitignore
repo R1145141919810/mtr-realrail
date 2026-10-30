@@ -1,11 +1,11 @@
-# ---- Gradle / 构建产物 ----
+﻿# ---- Gradle / 构建产物 ----
 .gradle/
 build/
 run/
 checkouts/
 libs/mtr-compile.jar
-.devstub/classes/
 *.log
+build-log.txt
 
 # ---- IDE ----
 .idea/

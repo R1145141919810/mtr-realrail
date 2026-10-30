@@ -1,140 +1,146 @@
-# 更好的列车限速及信号判定（MTR RealRail）
+# 更好的列车限速及信号判定 · MTR RealRail
 
-> [Minecraft Transit Railway](https://github.com/Minecraft-Transit-Railway/Minecraft-Transit-Railway)（MTR **4.0.0 及以后**）的附属模组
-> · 平台 **Minecraft 1.20.1 + Forge 47.x** · 协议 **MIT**
+> Minecraft **1.20.1** + **Forge 47.x** + **MTR 4.0.5** 附属模组
+> 当前版本：**v1.5.0**（`mtrrealrail-1.5.0+1.20.1-forge.jar`）
 
-模组正式名称：**更好的列车限速及信号判定**　modId：`mtrrealrail`
+在 MTR 原版基础上补齐"限速判定 / 信号隔离 / 动态占用 / 路径与发车调度 / 站台智能调度"的一整套运行控制能力，
+并可与外置调度服务组成**规划 + 执行**的完整链路。
 
-| 项 | 值 |
-|---|---|
-| 支持版本 | Minecraft 1.20.1 / Forge 47.x / MTR 4.0.0+ |
-| 当前版本 | **v1.0.0**（另含早期预览版 v1.0.0-preview） |
-| 产物 | `dist/mtrrealrail-1.0.0+1.20.1.jar`（编译产物在 `build/libs/`） |
-| 前置 | 只需 **Forge + MTR**（不依赖 Architectury 等额外 API） |
+---
+
+## ⚠️ 可选配套模组（必须成对安装）
+
+本模组的"车站站台智能调度""车厂在线路中间""运行时改停站台"等高级功能依赖下面的**调度 + 执行**两件套，
+它们是一套体系里的**两个部分，必须同时安装**；缺任何一个都会退化为"无完整功能"（本模组其余功能不受影响）：
+
+| 仓库 | 作用 | 缺装后果 |
+|---|---|---|
+| [**mtr-tsc-dispatch-system**](https://github.com/R1145141919810/mtr-tsc-dispatch-system) | 外置调度与动态路径规划服务（规划端） | 站台智能调度进入"等待 tsc-dispatch"待机，不会自行派车/改停 |
+| [**mtr-control-execute-brige**](https://github.com/R1145141919810/mtr-control-execute-brige) | 游戏内控制执行桥（执行端，默认 `127.0.0.1:8889`） | 站台智能调度进入"等待执行链"待机；"车厂在线路中间"不会派车/回场 |
+
+> **务必两个一起装**：单独装规划端只能"看"，单独装执行端没有人下指令。
+> 两者都就绪后，本模组会自动把执行桥地址/令牌推送给规划服务（`POST /v1/config`），
+> 线路调度界面底部会显示 `执行链：tsc-dispatch 已连接 / 执行桥 mtbridge 已连接`。
 
 ---
 
 ## 功能
 
-### 一：限速变更时机后移（默认"车尾判定"）
+| # | 功能 | 说明 |
+|---|---|---|
+| 1 | **列车限速判定** | 轨道连接器处按"**车尾完全通过**才变更限速"判定（`TAIL`，默认；可切回 MTR 原版 `HEAD`），刷子可逐节点切换 |
+| 2 | **多信号系统隔离** | 只对**共享同一信号颜色**的列车做闭塞/让行判断，不同线路互不干扰 |
+| 3 | **动态轨道占用** | 用列车实时位置/速度计算米级占用区间与安全间距，同信号系统内允许"移动闭塞"式跟车放行 |
+| 4 | **自动最优路径规划** | 依据实时占用与前车关系打分，必要时触发 MTR 重新生成车厂路径 |
+| 5 | **动态发车与避让** | 停站满阈值后按实时交通决定等待让行（有硬上限与冷却，绝不压死站台） |
+| 6 | **车站站台智能调度** | 车站界面开关（≥2 站台才显示）+ 线路界面"线路智能调度站台"多选 GUI；运行时把列车改停到**允许且空闲**的站台 |
+| 7 | **车厂在线路中间**（v1.5.0） | 车厂 → 优化线路配置开关：按最近路线驶向最近车站投入运行；时刻表进入"无车发出的时段"自动回场；开关切换自动**清除车辆 + 刷新路线** |
+| 8 | **运行时改停站台**（v1.5.0） | 经 `set_platform` 指令让执行桥为运行中的列车**重新生成进路**，绕开 MTR `immutablePath` 不可替换的限制 |
 
-原版 MTR 中列车**车头一进入新轨道段就立即按该段限速变速**，前后车厢可能处在不同限速的轨道上。
-本模组把限速变更推迟到**车尾完全经过轨道连接器之后**：
-
-- 车头跨越轨道连接器时记录"待生效边界"，限速先保持旧值；
-- 车尾所在轨道段索引越过该边界（整列车进入新段）后，才按新段限速加/减速；
-- 预制动（`Siding.getUpcomingSlowerSpeed`）同步改为"车尾感知"：扫描到车尾判定节点即停止向后预判，
-  避免车头还没过连接器就提前减速；
-- 安全制动（信号红灯、平台停车、前方占用）与物理防撞**完全不受影响**。
-
-**按节点单独切换**：手持刷子（`mtr:brush`）右击轨道节点方块（`mtr:rail`）会**照常打开 MTR 原版轨道界面**
-（轨道形状 / 轨道样式，原版功能完全保留），界面中会多出一个"**节点限速判定**"按钮；点击后进入本模组的判定界面，
-一键切换"车头进入立即变更（原版）/ 车尾通过后变更（推荐）"，关闭后自动返回 MTR 原版轨道界面，
-设置立即写入世界存档（`world/mtrrealrail/nodes.json`）。
-
-### 二：多信号系统互不干扰
-
-MTR 的 16 色信号连接器各自是一个独立信号系统。原版 `Rail.isBlocked` 检查并预留该轨道上的**全部颜色**，
-导致系统 A 的列车会占用 B 系统的区间、也会被 B 系统的红灯拦停。本模组：
-
-- 每 tick 计算列车车身覆盖轨道段 `signalColors` 的并集，即"列车实际所在的信号系统"；
-- `Rail.isBlocked` 只检查/预留列车所属颜色的区间，各信号系统互不干扰；
-- 未登记（首 tick 等异常）自动回退原版逻辑；列车不在任何带信号轨道上时不受信号约束、不预留区间；
-- 信号灯渲染按颜色打包，隔离后显示自动正确；物理防撞与颜色无关，两列车不会相撞。
+界面入口：
+- 铁路仪表板 → **车厂** → 「优化线路配置」（动态闭塞 / 路径规划 / 发车避让 / **车厂在线路中间**）
+- 铁路仪表板 → **车站** → 右下角「站台智能调度: 开/关」（仅 ≥2 站台的车站）
+- 铁路仪表板 → **线路** → 「线路智能调度站台」（按车站多选允许停靠站台，底部显示调度链状态）
 
 ---
 
 ## 安装
 
-1. 安装 **Minecraft 1.20.1 + Forge 47.x**（服务端/客户端均可）；
-2. 放入 **MTR 4.0.0+**（`minecraft-transit-railway-FORGE-4.0.x+1.20.1.jar`）；
-3. 放入本模组 `mtrrealrail-1.0.0+1.20.1.jar`（见 [Releases](../../releases) 或 `dist/`）。
+1. Minecraft 1.20.1 + Forge 47.4.x + **MTR 4.0.5**（Forge 版）。
+2. 把 `dist/mtrrealrail-1.5.0+1.20.1-forge.jar` 放进 `mods/`（**客户端 + 服务端都要放**）。
+3. 需要高级调度功能时，**同时**安装配套两件套（见上表），并先启动服务器、再启动 `mtr-tsc-dispatch-system`。
 
-## 配置（`config/mtrrealrail.properties`）
+---
 
-| 键 | 默认值 | 说明 |
-|---|---|---|
-| `default_node_mode` | `TAIL` | 未被刷子单独配置的节点：`TAIL` = 车尾通过后变更；`HEAD` = 原版立即变更 |
-| `signal_isolation` | `true` | 是否启用多信号系统隔离 |
-| `brush_gui_trigger` | `CLICK` | `CLICK` = 普通右键时在 MTR 原版轨道界面中追加按钮；`SHIFT` = 仅 Shift+右键时追加 |
+## 配置
+
+`config/mtrrealrail.properties`（首次启动自动生成；修改后需重启）：
+
+```properties
+# 限速判定
+default_node_mode=TAIL            # TAIL（车尾通过才变）/ HEAD（MTR 原版）
+signal_isolation=true             # 多信号系统隔离
+
+# 车厂级默认值（每个车厂可在 GUI 中单独覆盖）
+optimize_dynamic_block_release=true
+optimize_safety_margin_meters=30
+optimize_route_enabled=true
+optimize_path_lookahead_meters=400
+optimize_departure_guard=true
+optimize_dwell_threshold_seconds=10
+optimize_conflict_window_seconds=5
+optimize_max_hold_seconds=15
+
+# 调度链（规划端 tsc-dispatch + 执行桥）
+tsc_dispatch_enabled=true
+tsc_dispatch_url=http://127.0.0.1:8787
+tsc_dispatch_poll_seconds=2
+tsc_dispatch_required=true        # true = 选台决策只认调度服务
+tsc_dispatch_dimension=0
+tsc_dispatch_timeout_ms=1200
+tsc_dispatch_export_path=../tsc-dispatch/config/dispatch.generated.yml
+
+bridge_url=http://127.0.0.1:8889  # 执行桥地址
+bridge_token=                     # 留空 = 自动读取 config/mtbridge.json 的 token
+bridge_push_enabled=true          # 自动把桥地址/令牌推给调度服务
+bridge_probe_seconds=5
+execution_chain_required=true     # 链不完整时高级调度待机（不本地乱派）
+```
+
+存档级配置（随世界保存）：
+
+```
+world/mtrrealrail/platforms.json   # 车站开关 + 线路 × 车站 → 允许停靠站台
+world/mtrrealrail/nodes.json       # 每个轨道连接器的限速判定方式
+world/mtrrealrail/optimize.json    # 每个车厂的优化配置（含「车厂在线路中间」）
+```
 
 ---
 
 ## 构建
 
-需要 **JDK 17**（`gradlew` 自带 Gradle wrapper）：
+环境：**JDK 17**、**Gradle 8.1+**（自带 wrapper）、联网（首次会从 Modrinth 拉 MTR jar）。
 
 ```bash
-gradlew setupLibrary      # 下载/复用 MTR 发行 jar，裁剪出 libs/mtr-compile.jar（编译依赖）
-gradlew build             # 产物 build/libs/mtrrealrail-1.0.0+1.20.1.jar
+./gradlew setupLibrary   # 从 MTR 4.0.5 发行 jar 提取 org.mtr.* 与重定位 fastutil 到 libs/mtr-compile.jar
+./gradlew build          # 产物 build/libs/mtrrealrail-1.5.0+1.20.1.jar
 ```
 
-`setupLibrary` 会优先复用本地已下载的 MTR 发行 jar，否则从
-[Modrinth Maven](https://api.modrinth.com/maven/maven/modrinth/minecraft-transit-railway/) 下载
-`FORGE-4.0.5+1.20.1`（下载后校验 zip 完整性，失败自动重试）。
-
-> 为什么用 MTR **发行 jar** 而不是 dev jar：发行版把 fastutil 重定位到了
-> `org.mtr.libraries.it.unimi.dsi.fastutil.*`，Mixin 的注入描述符必须与运行时字节码一致。
-
-### 开发环境注意事项
-
-ForgeGradle 开发环境里模组以"目录"形式加载、没有 MANIFEST，而 Forge 是通过 `MixinConfigs` 清单属性
-注册 Mixin 配置的，因此 `runClient`/`runServer` 里 **Mixin 不会生效**；生产版 MTR 也无法直接放进 `run/mods`
-（其自带 mixin 使用 SRG 名，开发环境为官方名）。功能验证请把 jar 放进真实客户端/服务端的 `mods/` 进行。
-仅让开发环境跑起来可执行 `gradlew buildMtrStubJar`（生成含裁剪 MTR 类的 `run/mods/mtr-stub.jar`）。
-
-服务端可加 `-Dmtrrealrail.verifyMixins=true`：启动时强制加载全部 Mixin 目标类，任何注入不匹配都会立刻报错。
+> Windows 下若遇到 `Could not initialize native services`，把 `GRADLE_USER_HOME` 指到可写目录即可。
+> 自检：服务端加 `-Dmtrrealrail.verifyMixins=true`，启动时会强制加载全部 Mixin 目标类，注入失败直接报错。
 
 ---
 
-## 仓库结构
+## 兼容性
+
+- 目标：Minecraft 1.20.1 / Forge 47.4.23 / MTR 4.0.5（Forge）。
+- 只依赖 `org.mtr.core` 公开成员与少数 MTR 自有方法名（`init2`、`writePlatformCache` 等）；MTR 大版本改名时主 Mixin 配置会直接报错提示。
+- 客户端界面 Mixin 位于 `required=false` 配置：注入失败只记日志，不影响启动。
+- 与其它 MTR 附属共存良好；配合两件套时由它们负责规划与执行，本模组提供策略、界面与状态展示。
+
+## 目录结构
 
 ```
-build.gradle / settings.gradle / gradle.properties   # ForgeGradle 6 工程（仓库根 = 项目根）
-src/main/java/mtr/realrail/
-├─ MtrRealRail.java                  # 模组入口（@Mod）：配置、网络、事件、存档数据、Mixin 自检
-├─ RealRailConfig.java               # 全局配置
-├─ NodeModeStore.java                # 每节点判定方式存储（world/mtrrealrail/nodes.json）
-├─ SignalIsolationRegistry.java      # 列车 id → 所属信号颜色（TTL 10s）
-├─ SpeedLimitHelper.java             # 需求一核心：边界状态机 + 生效限速 + 车尾感知预制动
-├─ NodeModeNetwork.java              # Forge SimpleChannel：开屏 / 请求 / 切换
-├─ client/                           # 仅客户端：NodeModeScreen、RailScreenBridge、RailNodeInteractionHandler
-└─ mixin/
-   ├─ VehicleSimulateMixin.java      # Vehicle.simulate / simulateMoving 注入
-   ├─ VehicleSchemaAccessor.java     # @Accessor：读取父类 VehicleSchema.railProgress
-   ├─ RailSignalIsolationMixin.java  # Rail.isBlocked 隔离
-   └─ RailModifierScreenMixin.java   # 在 MTR 原版轨道界面注入"节点限速判定"按钮（客户端）
-docs/                                # 技术方案、核心实现、环境搭建、风险说明、交付与验证记录
-dist/                                # 已构建的发布产物
+build.gradle / settings.gradle / gradle.properties   Gradle 工程
+src/main/java/mtr/realrail/                          主模组（限速、信号隔离、调度、网络、界面）
+src/main/java/mtr/realrail/mixin/                    Mixin（Vehicle / Rail / PathData / 界面注入）
+src/main/java/mtr/realrail/traffic/                  动态占用、发车避让、站台调度、车厂中间调度
+src/main/java/mtr/realrail/dispatch/                 调度链客户端（tsc-dispatch / 执行桥）
+docs/                                                设计、实现与联调记录
+dist/                                                发布 jar
 ```
 
-> 说明：`checkouts/`、`libs/mtr-compile.jar`、`build/`、`run/` 均为构建期生成物，已在 `.gitignore` 中忽略。
+## 更新日志
 
----
-
-## 版本历史
-
-| 版本 | 说明 |
-|---|---|
-| **v1.0.0** | 正式版。节点判定界面作为按钮**嵌入 MTR 原版轨道界面**（原版交互与功能完全保留，关闭后自动返回）。核心：车尾判定限速状态机、16 色信号系统隔离、按节点切换与持久化。 |
-| v1.0.0-preview | 早期预览版（`dist/history/mtrrealrail-1.0.0-preview-brushgui.jar`）。刷子右击轨道节点**直接打开**本模组界面，会替代 MTR 原版界面。 |
-
----
-
-## 已验证内容
-
-- `gradlew build` 通过（ForgeGradle 6 + `reobfJar`，产物 `mtrrealrail-1.0.0+1.20.1.jar`）；
-- **真实 Forge 1.20.1-47.4.23 独立服务端 + MTR FORGE-4.0.5+1.20.1** 启动成功，
-  三个核心 Mixin 全部注入成功（`VehicleSimulateMixin` → `org.mtr.core.data.Vehicle`、
-  `VehicleSchemaAccessor` → `VehicleSchema`、`RailSignalIsolationMixin` → `Rail`），
-  五个 Mixin 目标类均正常加载；
-- 实车行为（限速变更时机、节点切换与持久化、双色信号隔离）请按 `docs/03` §6 的清单在游戏内实测。
-
----
+### v1.5.0
+- 新增：车厂「优化线路配置」开关 **车厂在线路中间**（最近车站派车 / 无班次回场 / 切换自动清车刷新路线）。
+- 新增：运行时改停站台 —— 经 `set_platform` 由执行桥重新生成进路，解除"路径不可中途改写"限制。
+- 修复：车厂配置表头被当作数据行导致整份配置读取失败。
+- 修复：列车被无限期压在站台（车门不关）—— 前后车判定与决策表重写。
+- 修复：车站界面 Mixin 含非 private static 方法导致整体不生效；界面重初始化死循环。
+- 新增：车站站台智能调度（车站开关 + 线路允许集合多选 GUI + 动态分配）。
+- 新增：动态轨道占用 / 自动最优路径规划 / 动态发车避让 + 车厂优化配置 GUI（v1.1.0）。
 
 ## 许可
 
-本项目采用 **MIT License**，见 [LICENSE](LICENSE)。
-
-MTR 本体及其核心 Transport-Simulation-Core 同样为 MIT（Copyright Jonathan Ho），
-本项目通过 Mixin 对接其接口，未复制其源码。
+MIT，见 [LICENSE](LICENSE)。
